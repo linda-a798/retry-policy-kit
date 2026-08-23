@@ -1,0 +1,4 @@
+# One outcome per line, in the order the calls happened.
+fail
+fail
+ok
