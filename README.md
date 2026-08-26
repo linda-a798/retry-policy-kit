@@ -33,13 +33,16 @@ base_delay_ms=250
 max_delay_ms=8000
 strategy=exponential   # or "fixed"
 multiplier=2.0         # only read when strategy=exponential
-jitter=full            # or "none"
+jitter=full            # or "none", "decorrelated"
 ```
 
 `max_delay_ms` caps the computed wait before jitter is applied. `jitter=full`
 picks a uniform random delay between 0 and that capped value on each call,
-which avoids synchronized retry storms across many clients; see
-`examples/policy.conf` for a complete example.
+which avoids synchronized retry storms across many clients. `jitter=decorrelated`
+instead draws each delay from `[base_delay_ms, previous_delay * 3]`, capped at
+`max_delay_ms`; it ignores `strategy` and `multiplier` entirely since the
+recurrence already determines the growth. See `examples/policy.conf` for a
+complete example.
 
 ## Usage
 
@@ -81,8 +84,8 @@ $ cat examples/events.txt | retryctl simulate --policy examples/policy.conf --ev
 ## Status
 
 Early skeleton. The library currently supports fixed and exponential
-backoff with an optional full-jitter step. See the issue tracker for what's
-missing before this is worth depending on.
+backoff, with none, full, or decorrelated jitter. See the issue tracker for
+what's missing before this is worth depending on.
 
 ## License
 

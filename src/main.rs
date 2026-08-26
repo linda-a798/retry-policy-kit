@@ -69,9 +69,10 @@ fn cmd_plan(args: &[String]) -> Result<(), String> {
     // Seed is fixed so `plan` output is reproducible run to run; it's a
     // preview of the schedule shape, not a claim about real jitter draws.
     let mut rng_state = 0x9E3779B97F4A7C15u64;
+    let mut prev_delay = policy.base_delay;
     println!("max_attempts: {}", policy.max_attempts);
     for attempt in 1..policy.max_attempts {
-        let delay = policy.delay_for_attempt(attempt, &mut rng_state);
+        let delay = policy.delay_for_attempt(attempt, &mut rng_state, &mut prev_delay);
         println!("  before attempt {}: wait {:?}", attempt + 1, delay);
     }
     Ok(())
@@ -94,6 +95,7 @@ fn cmd_simulate(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("reading events from {events_source}: {e}"))?;
 
     let mut rng_state = 0x9E3779B97F4A7C15u64;
+    let mut prev_delay = policy.base_delay;
     let mut attempt = 0u32;
     for raw_line in events_text.lines() {
         let outcome = raw_line.trim();
@@ -111,7 +113,7 @@ fn cmd_simulate(args: &[String]) -> Result<(), String> {
                     println!("attempt {attempt}: failed, no attempts left, giving up");
                     return Ok(());
                 }
-                let delay = policy.delay_for_attempt(attempt, &mut rng_state);
+                let delay = policy.delay_for_attempt(attempt, &mut rng_state, &mut prev_delay);
                 println!("attempt {attempt}: failed, waiting {delay:?} before retry");
             }
             other => return Err(format!("unrecognized event {other:?}, expected 'ok' or 'fail'")),

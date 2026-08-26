@@ -16,6 +16,14 @@ pub enum Jitter {
     /// architecture blog post on backoff strategies for why this beats a fixed
     /// or partial jitter under contention.
     Full,
+    /// Decorrelated jitter: each delay is drawn uniformly from
+    /// `[base_delay, previous_delay * 3]`, capped at `max_delay`. Anchoring to
+    /// the previous draw instead of a fresh exponential ceiling keeps the
+    /// growth less bursty than full jitter under sustained failures. Ignores
+    /// the configured `Backoff` strategy entirely, since the schedule is
+    /// already implied by the recurrence. See the AWS architecture blog post
+    /// on backoff strategies.
+    Decorrelated,
 }
 
 #[derive(Debug, Clone)]
@@ -30,18 +38,44 @@ pub struct RetryPolicy {
 impl RetryPolicy {
     /// Delay to wait before the given attempt number (1-based: the wait
     /// before attempt 2 is `delay_for_attempt(1, ..)`).
-    pub fn delay_for_attempt(&self, attempt: u32, rng_state: &mut u64) -> Duration {
+    ///
+    /// `prev_delay` is the value this function returned last time (or
+    /// `base_delay` before the first call); only `Jitter::Decorrelated` reads
+    /// it, but every call updates it so callers don't have to know which
+    /// jitter mode is active.
+    pub fn delay_for_attempt(
+        &self,
+        attempt: u32,
+        rng_state: &mut u64,
+        prev_delay: &mut Duration,
+    ) -> Duration {
         let base_ms = self.base_delay.as_millis() as f64;
-        let raw_ms = match self.backoff {
-            Backoff::Fixed => base_ms,
-            Backoff::Exponential { multiplier } => base_ms * multiplier.powi(attempt as i32 - 1),
-        };
-        let capped_ms = raw_ms.min(self.max_delay.as_millis() as f64);
+        let max_ms = self.max_delay.as_millis() as f64;
+
         let final_ms = match self.jitter {
-            Jitter::None => capped_ms,
-            Jitter::Full => capped_ms * next_random(rng_state),
+            Jitter::Decorrelated => {
+                let ceiling = (prev_delay.as_millis() as f64 * 3.0).max(base_ms).min(max_ms);
+                base_ms + next_random(rng_state) * (ceiling - base_ms)
+            }
+            Jitter::None | Jitter::Full => {
+                let raw_ms = match self.backoff {
+                    Backoff::Fixed => base_ms,
+                    Backoff::Exponential { multiplier } => {
+                        base_ms * multiplier.powi(attempt as i32 - 1)
+                    }
+                };
+                let capped_ms = raw_ms.min(max_ms);
+                if self.jitter == Jitter::Full {
+                    capped_ms * next_random(rng_state)
+                } else {
+                    capped_ms
+                }
+            }
         };
-        Duration::from_millis(final_ms.round() as u64)
+
+        let delay = Duration::from_millis(final_ms.round() as u64);
+        *prev_delay = delay;
+        delay
     }
 }
 
@@ -65,7 +99,7 @@ fn next_random(state: &mut u64) -> f64 {
 /// max_delay_ms=10000
 /// strategy=exponential   # or "fixed"
 /// multiplier=2.0         # only used when strategy=exponential
-/// jitter=full            # or "none"
+/// jitter=full            # or "none", "decorrelated"
 /// ```
 pub fn parse_policy(text: &str) -> Result<RetryPolicy, String> {
     let mut max_attempts = 5u32;
@@ -126,7 +160,12 @@ pub fn parse_policy(text: &str) -> Result<RetryPolicy, String> {
     let jitter = match jitter.as_str() {
         "none" => Jitter::None,
         "full" => Jitter::Full,
-        other => return Err(format!("unknown jitter {other:?}, expected none or full")),
+        "decorrelated" => Jitter::Decorrelated,
+        other => {
+            return Err(format!(
+                "unknown jitter {other:?}, expected none, full, or decorrelated"
+            ))
+        }
     };
 
     Ok(RetryPolicy {
@@ -152,8 +191,9 @@ mod tests {
             jitter: Jitter::None,
         };
         let mut state = 42;
-        assert_eq!(policy.delay_for_attempt(1, &mut state), Duration::from_millis(100));
-        assert_eq!(policy.delay_for_attempt(5, &mut state), Duration::from_millis(100));
+        let mut prev = policy.base_delay;
+        assert_eq!(policy.delay_for_attempt(1, &mut state, &mut prev), Duration::from_millis(100));
+        assert_eq!(policy.delay_for_attempt(5, &mut state, &mut prev), Duration::from_millis(100));
     }
 
     #[test]
@@ -166,10 +206,11 @@ mod tests {
             jitter: Jitter::None,
         };
         let mut state = 42;
-        assert_eq!(policy.delay_for_attempt(1, &mut state), Duration::from_millis(100));
-        assert_eq!(policy.delay_for_attempt(2, &mut state), Duration::from_millis(200));
-        assert_eq!(policy.delay_for_attempt(3, &mut state), Duration::from_millis(400));
-        assert_eq!(policy.delay_for_attempt(4, &mut state), Duration::from_millis(500));
+        let mut prev = policy.base_delay;
+        assert_eq!(policy.delay_for_attempt(1, &mut state, &mut prev), Duration::from_millis(100));
+        assert_eq!(policy.delay_for_attempt(2, &mut state, &mut prev), Duration::from_millis(200));
+        assert_eq!(policy.delay_for_attempt(3, &mut state, &mut prev), Duration::from_millis(400));
+        assert_eq!(policy.delay_for_attempt(4, &mut state, &mut prev), Duration::from_millis(500));
     }
 
     #[test]
@@ -182,10 +223,46 @@ mod tests {
             jitter: Jitter::Full,
         };
         let mut state = 12345;
+        let mut prev = policy.base_delay;
         for _ in 0..100 {
-            let delay = policy.delay_for_attempt(1, &mut state);
+            let delay = policy.delay_for_attempt(1, &mut state, &mut prev);
             assert!(delay <= Duration::from_millis(1000));
         }
+    }
+
+    #[test]
+    fn decorrelated_jitter_stays_within_base_and_max() {
+        let policy = RetryPolicy {
+            max_attempts: 8,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_millis(2000),
+            backoff: Backoff::Exponential { multiplier: 2.0 },
+            jitter: Jitter::Decorrelated,
+        };
+        let mut state = 777;
+        let mut prev = policy.base_delay;
+        for attempt in 1..policy.max_attempts {
+            let delay = policy.delay_for_attempt(attempt, &mut state, &mut prev);
+            assert!(delay >= Duration::from_millis(100));
+            assert!(delay <= Duration::from_millis(2000));
+            assert_eq!(prev, delay);
+        }
+    }
+
+    #[test]
+    fn decorrelated_jitter_never_exceeds_three_times_previous() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(10),
+            backoff: Backoff::Fixed,
+            jitter: Jitter::Decorrelated,
+        };
+        let mut state = 1;
+        let mut prev = Duration::from_millis(500);
+        let delay = policy.delay_for_attempt(1, &mut state, &mut prev);
+        assert!(delay >= Duration::from_millis(100));
+        assert!(delay <= Duration::from_millis(1500));
     }
 
     #[test]
