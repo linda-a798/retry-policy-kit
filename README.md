@@ -81,6 +81,20 @@ invocation, since stdin can only be consumed once:
 $ cat examples/events.txt | retryctl simulate --policy examples/policy.conf --events -
 ```
 
+Both subcommands take `--format json` for scripting, instead of the default
+human-readable text:
+
+```
+$ retryctl plan --policy examples/policy.conf --format json
+{"max_attempts":5,"schedule":[{"before_attempt":2,"wait_ms":250},{"before_attempt":3,"wait_ms":500},{"before_attempt":4,"wait_ms":1000},{"before_attempt":5,"wait_ms":2000}]}
+
+$ retryctl simulate --policy examples/policy.conf --events examples/events.txt --format json
+{"result":"complete","attempts":[{"attempt":1,"outcome":"failed","wait_ms":187},{"attempt":2,"outcome":"failed","wait_ms":412},{"attempt":3,"outcome":"succeeded"}]}
+```
+
+`result` is `"complete"` when the events ran to a success or an exhausted
+policy, or `"incomplete"` if the event file ran out first.
+
 ## Status
 
 Early skeleton. The library currently supports fixed and exponential
