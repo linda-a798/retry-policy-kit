@@ -33,9 +33,24 @@ pub struct RetryPolicy {
     pub max_delay: Duration,
     pub backoff: Backoff,
     pub jitter: Jitter,
+    /// Total wall-clock budget for waiting between attempts, on top of
+    /// `max_attempts`. A policy with no deadline is bounded only by attempt
+    /// count; one with a deadline gives up early if the delays already
+    /// waited would use up the budget, even with attempts still left. This
+    /// matters for callers with their own upstream timeout (an HTTP request
+    /// deadline, a job's time slice) where retrying past that point is
+    /// pointless no matter how many attempts remain.
+    pub deadline: Option<Duration>,
 }
 
 impl RetryPolicy {
+    /// Whether `elapsed` (the sum of delays already waited between
+    /// attempts) has used up the configured retry budget. Policies without
+    /// a deadline never exhaust on elapsed time, only on `max_attempts`.
+    pub fn deadline_exceeded(&self, elapsed: Duration) -> bool {
+        self.deadline.is_some_and(|deadline| elapsed >= deadline)
+    }
+
     /// Delay to wait before the given attempt number (1-based: the wait
     /// before attempt 2 is `delay_for_attempt(1, ..)`).
     ///
@@ -100,6 +115,7 @@ fn next_random(state: &mut u64) -> f64 {
 /// strategy=exponential   # or "fixed"
 /// multiplier=2.0         # only used when strategy=exponential
 /// jitter=full            # or "none", "decorrelated"
+/// deadline_ms=5000       # optional; total wait budget across all attempts
 /// ```
 pub fn parse_policy(text: &str) -> Result<RetryPolicy, String> {
     let mut max_attempts = 5u32;
@@ -108,6 +124,7 @@ pub fn parse_policy(text: &str) -> Result<RetryPolicy, String> {
     let mut multiplier = 2.0f64;
     let mut strategy = "exponential".to_string();
     let mut jitter = "none".to_string();
+    let mut deadline_ms: Option<u64> = None;
 
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
@@ -143,6 +160,13 @@ pub fn parse_policy(text: &str) -> Result<RetryPolicy, String> {
             }
             "strategy" => strategy = value.to_string(),
             "jitter" => jitter = value.to_string(),
+            "deadline_ms" => {
+                deadline_ms = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("line {line_no}: invalid deadline_ms {value:?}"))?,
+                )
+            }
             other => return Err(format!("line {line_no}: unknown key {other:?}")),
         }
     }
@@ -174,6 +198,7 @@ pub fn parse_policy(text: &str) -> Result<RetryPolicy, String> {
         max_delay: Duration::from_millis(max_delay_ms),
         backoff,
         jitter,
+        deadline: deadline_ms.map(Duration::from_millis),
     })
 }
 
@@ -189,6 +214,7 @@ mod tests {
             max_delay: Duration::from_secs(10),
             backoff: Backoff::Fixed,
             jitter: Jitter::None,
+            deadline: None,
         };
         let mut state = 42;
         let mut prev = policy.base_delay;
@@ -204,6 +230,7 @@ mod tests {
             max_delay: Duration::from_millis(500),
             backoff: Backoff::Exponential { multiplier: 2.0 },
             jitter: Jitter::None,
+            deadline: None,
         };
         let mut state = 42;
         let mut prev = policy.base_delay;
@@ -221,6 +248,7 @@ mod tests {
             max_delay: Duration::from_secs(10),
             backoff: Backoff::Fixed,
             jitter: Jitter::Full,
+            deadline: None,
         };
         let mut state = 12345;
         let mut prev = policy.base_delay;
@@ -238,6 +266,7 @@ mod tests {
             max_delay: Duration::from_millis(2000),
             backoff: Backoff::Exponential { multiplier: 2.0 },
             jitter: Jitter::Decorrelated,
+            deadline: None,
         };
         let mut state = 777;
         let mut prev = policy.base_delay;
@@ -257,6 +286,7 @@ mod tests {
             max_delay: Duration::from_secs(10),
             backoff: Backoff::Fixed,
             jitter: Jitter::Decorrelated,
+            deadline: None,
         };
         let mut state = 1;
         let mut prev = Duration::from_millis(500);
@@ -269,5 +299,33 @@ mod tests {
     fn parse_policy_rejects_unknown_key() {
         let err = parse_policy("bogus=1").unwrap_err();
         assert!(err.contains("unknown key"));
+    }
+
+    #[test]
+    fn parse_policy_defaults_to_no_deadline() {
+        let policy = parse_policy("max_attempts=3").unwrap();
+        assert_eq!(policy.deadline, None);
+        assert!(!policy.deadline_exceeded(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn parse_policy_reads_deadline_ms() {
+        let policy = parse_policy("deadline_ms=1500").unwrap();
+        assert_eq!(policy.deadline, Some(Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn deadline_exceeded_is_inclusive_of_the_boundary() {
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(10),
+            backoff: Backoff::Fixed,
+            jitter: Jitter::None,
+            deadline: Some(Duration::from_millis(1000)),
+        };
+        assert!(!policy.deadline_exceeded(Duration::from_millis(999)));
+        assert!(policy.deadline_exceeded(Duration::from_millis(1000)));
+        assert!(policy.deadline_exceeded(Duration::from_millis(1001)));
     }
 }

@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use retryctl::parse_policy;
 
@@ -86,18 +87,27 @@ fn cmd_plan(args: &[String]) -> Result<(), String> {
     // preview of the schedule shape, not a claim about real jitter draws.
     let mut rng_state = 0x9E3779B97F4A7C15u64;
     let mut prev_delay = policy.base_delay;
-    let schedule: Vec<(u32, std::time::Duration)> = (1..policy.max_attempts)
-        .map(|attempt| {
-            let delay = policy.delay_for_attempt(attempt, &mut rng_state, &mut prev_delay);
-            (attempt + 1, delay)
-        })
-        .collect();
+    let mut elapsed = Duration::ZERO;
+    let mut schedule: Vec<(u32, Duration)> = Vec::new();
+    let mut budget_exhausted = false;
+    for attempt in 1..policy.max_attempts {
+        let delay = policy.delay_for_attempt(attempt, &mut rng_state, &mut prev_delay);
+        elapsed += delay;
+        if policy.deadline_exceeded(elapsed) {
+            budget_exhausted = true;
+            break;
+        }
+        schedule.push((attempt + 1, delay));
+    }
 
     match format {
         Format::Text => {
             println!("max_attempts: {}", policy.max_attempts);
             for (before_attempt, delay) in &schedule {
                 println!("  before attempt {before_attempt}: wait {delay:?}");
+            }
+            if budget_exhausted {
+                println!("  retry budget exhausted before schedule reached max_attempts");
             }
         }
         Format::Json => {
@@ -110,8 +120,12 @@ fn cmd_plan(args: &[String]) -> Result<(), String> {
                     )
                 })
                 .collect();
+            let deadline_ms = policy
+                .deadline
+                .map(|d| d.as_millis().to_string())
+                .unwrap_or_else(|| "null".to_string());
             println!(
-                r#"{{"max_attempts":{},"schedule":[{}]}}"#,
+                r#"{{"max_attempts":{},"deadline_ms":{deadline_ms},"budget_exhausted":{budget_exhausted},"schedule":[{}]}}"#,
                 policy.max_attempts,
                 entries.join(",")
             );
@@ -124,8 +138,8 @@ fn cmd_plan(args: &[String]) -> Result<(), String> {
 /// long the policy said to wait afterward (if it retried at all).
 enum AttemptOutcome {
     Succeeded,
-    Failed { wait: std::time::Duration },
-    Exhausted,
+    Failed { wait: Duration },
+    Exhausted { reason: &'static str },
 }
 
 fn cmd_simulate(args: &[String]) -> Result<(), String> {
@@ -147,6 +161,7 @@ fn cmd_simulate(args: &[String]) -> Result<(), String> {
 
     let mut rng_state = 0x9E3779B97F4A7C15u64;
     let mut prev_delay = policy.base_delay;
+    let mut elapsed = Duration::ZERO;
     let mut attempt = 0u32;
     let mut history: Vec<(u32, AttemptOutcome)> = Vec::new();
     let mut ran_out = true;
@@ -164,11 +179,20 @@ fn cmd_simulate(args: &[String]) -> Result<(), String> {
             }
             "fail" | "failure" => {
                 if attempt >= policy.max_attempts {
-                    history.push((attempt, AttemptOutcome::Exhausted));
+                    history.push((attempt, AttemptOutcome::Exhausted { reason: "no attempts left" }));
                     ran_out = false;
                     break;
                 }
                 let delay = policy.delay_for_attempt(attempt, &mut rng_state, &mut prev_delay);
+                if policy.deadline_exceeded(elapsed + delay) {
+                    history.push((
+                        attempt,
+                        AttemptOutcome::Exhausted { reason: "retry budget exhausted" },
+                    ));
+                    ran_out = false;
+                    break;
+                }
+                elapsed += delay;
                 history.push((attempt, AttemptOutcome::Failed { wait: delay }));
             }
             other => return Err(format!("unrecognized event {other:?}, expected 'ok' or 'fail'")),
@@ -183,8 +207,8 @@ fn cmd_simulate(args: &[String]) -> Result<(), String> {
                     AttemptOutcome::Failed { wait } => {
                         println!("attempt {attempt}: failed, waiting {wait:?} before retry")
                     }
-                    AttemptOutcome::Exhausted => {
-                        println!("attempt {attempt}: failed, no attempts left, giving up")
+                    AttemptOutcome::Exhausted { reason } => {
+                        println!("attempt {attempt}: failed, {reason}, giving up")
                     }
                 }
             }
@@ -203,8 +227,8 @@ fn cmd_simulate(args: &[String]) -> Result<(), String> {
                         r#"{{"attempt":{attempt},"outcome":"failed","wait_ms":{}}}"#,
                         wait.as_millis()
                     ),
-                    AttemptOutcome::Exhausted => {
-                        format!(r#"{{"attempt":{attempt},"outcome":"exhausted"}}"#)
+                    AttemptOutcome::Exhausted { reason } => {
+                        format!(r#"{{"attempt":{attempt},"outcome":"exhausted","reason":"{reason}"}}"#)
                     }
                 })
                 .collect();

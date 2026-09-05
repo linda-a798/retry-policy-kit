@@ -34,6 +34,7 @@ max_delay_ms=8000
 strategy=exponential   # or "fixed"
 multiplier=2.0         # only read when strategy=exponential
 jitter=full            # or "none", "decorrelated"
+deadline_ms=5000       # optional; total wait budget across all attempts
 ```
 
 `max_delay_ms` caps the computed wait before jitter is applied. `jitter=full`
@@ -43,6 +44,14 @@ instead draws each delay from `[base_delay_ms, previous_delay * 3]`, capped at
 `max_delay_ms`; it ignores `strategy` and `multiplier` entirely since the
 recurrence already determines the growth. See `examples/policy.conf` for a
 complete example.
+
+`deadline_ms` is a retry budget separate from `max_attempts`: it caps the
+total time spent waiting between attempts, not the wall-clock time since the
+first call. A policy gives up as soon as either bound is hit, whichever
+comes first. This matters when the caller has its own timeout (an HTTP
+client deadline, a job's remaining time slice) and retrying past that point
+just wastes the attempts it has left. Leaving it unset means only
+`max_attempts` bounds the policy, which is the default.
 
 ## Usage
 
@@ -86,7 +95,7 @@ human-readable text:
 
 ```
 $ retryctl plan --policy examples/policy.conf --format json
-{"max_attempts":5,"schedule":[{"before_attempt":2,"wait_ms":250},{"before_attempt":3,"wait_ms":500},{"before_attempt":4,"wait_ms":1000},{"before_attempt":5,"wait_ms":2000}]}
+{"max_attempts":5,"deadline_ms":null,"budget_exhausted":false,"schedule":[{"before_attempt":2,"wait_ms":250},{"before_attempt":3,"wait_ms":500},{"before_attempt":4,"wait_ms":1000},{"before_attempt":5,"wait_ms":2000}]}
 
 $ retryctl simulate --policy examples/policy.conf --events examples/events.txt --format json
 {"result":"complete","attempts":[{"attempt":1,"outcome":"failed","wait_ms":187},{"attempt":2,"outcome":"failed","wait_ms":412},{"attempt":3,"outcome":"succeeded"}]}
