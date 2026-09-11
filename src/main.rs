@@ -241,3 +241,55 @@ fn cmd_simulate(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_flag_finds_value_after_name() {
+        let a = args(&["plan", "--policy", "examples/policy.conf"]);
+        assert_eq!(parse_flag(&a, "--policy"), Some("examples/policy.conf".to_string()));
+    }
+
+    #[test]
+    fn parse_flag_missing_returns_none() {
+        let a = args(&["plan"]);
+        assert_eq!(parse_flag(&a, "--policy"), None);
+    }
+
+    #[test]
+    fn parse_flag_at_end_with_no_value_returns_none() {
+        let a = args(&["plan", "--policy"]);
+        assert_eq!(parse_flag(&a, "--policy"), None);
+    }
+
+    #[test]
+    fn parse_flag_uses_first_occurrence() {
+        let a = args(&["plan", "--policy", "a.conf", "--policy", "b.conf"]);
+        assert_eq!(parse_flag(&a, "--policy"), Some("a.conf".to_string()));
+    }
+
+    #[test]
+    fn parse_format_defaults_to_text() {
+        let a = args(&["plan"]);
+        assert_eq!(parse_format(&a).unwrap(), Format::Text);
+    }
+
+    #[test]
+    fn parse_format_reads_json() {
+        let a = args(&["plan", "--format", "json"]);
+        assert_eq!(parse_format(&a).unwrap(), Format::Json);
+    }
+
+    #[test]
+    fn parse_format_rejects_unknown_value() {
+        let a = args(&["plan", "--format", "yaml"]);
+        let err = parse_format(&a).unwrap_err();
+        assert!(err.contains("unknown --format"));
+    }
+}
