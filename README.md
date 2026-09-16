@@ -104,6 +104,22 @@ $ retryctl simulate --policy examples/policy.conf --events examples/events.txt -
 `result` is `"complete"` when the events ran to a success or an exhausted
 policy, or `"incomplete"` if the event file ran out first.
 
+## Example: retrying a real HTTP call
+
+`examples/http_retry.rs` wires a policy into an actual retry loop against a
+real socket, using only `std::net::TcpStream` — no HTTP client dependency,
+just enough of HTTP/1.1 to send a GET and read a status line back:
+
+```
+$ cargo run --example http_retry -- example.com 80 /
+```
+
+A 4th argument points it at a policy file; without one it falls back to a
+small built-in policy. 5xx responses and 429 are treated as retryable; any
+other status is returned immediately. This is meant as a worked example of
+wiring `retryctl::RetryPolicy` into a real caller, not as a general-purpose
+HTTP client.
+
 ## Status
 
 Early skeleton. The library currently supports fixed and exponential
