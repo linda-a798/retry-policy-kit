@@ -37,6 +37,12 @@ jitter=full            # or "none", "decorrelated"
 deadline_ms=5000       # optional; total wait budget across all attempts
 ```
 
+`multiplier` must be a positive number when `strategy=exponential` — zero,
+negative, or `NaN` would otherwise silently collapse or invert the growth
+instead of erroring where the mistake is visible. `max_delay_ms` must be at
+least `base_delay_ms`, since a lower cap would make every delay hit the
+ceiling instead of following the configured strategy.
+
 `max_delay_ms` caps the computed wait before jitter is applied. `jitter=full`
 picks a uniform random delay between 0 and that capped value on each call,
 which avoids synchronized retry storms across many clients. `jitter=decorrelated`

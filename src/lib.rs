@@ -181,6 +181,22 @@ pub fn parse_policy(text: &str) -> Result<RetryPolicy, String> {
         other => return Err(format!("unknown strategy {other:?}, expected fixed or exponential")),
     };
 
+    // A zero, negative, or NaN multiplier makes exponential growth produce
+    // zero, negative (silently clamped to 0 by the u64 cast), or garbage
+    // delays instead of an error, so reject it here where the mistake is
+    // still visible in the offending config value.
+    if let Backoff::Exponential { multiplier } = backoff {
+        if !(multiplier > 0.0) {
+            return Err(format!("multiplier must be positive, got {multiplier}"));
+        }
+    }
+
+    if max_delay_ms < base_delay_ms {
+        return Err(format!(
+            "max_delay_ms ({max_delay_ms}) must be >= base_delay_ms ({base_delay_ms})"
+        ));
+    }
+
     let jitter = match jitter.as_str() {
         "none" => Jitter::None,
         "full" => Jitter::Full,
@@ -312,6 +328,31 @@ mod tests {
     fn parse_policy_reads_deadline_ms() {
         let policy = parse_policy("deadline_ms=1500").unwrap();
         assert_eq!(policy.deadline, Some(Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn parse_policy_rejects_zero_multiplier() {
+        let err = parse_policy("strategy=exponential\nmultiplier=0").unwrap_err();
+        assert!(err.contains("multiplier must be positive"));
+    }
+
+    #[test]
+    fn parse_policy_rejects_negative_multiplier() {
+        let err = parse_policy("strategy=exponential\nmultiplier=-2.0").unwrap_err();
+        assert!(err.contains("multiplier must be positive"));
+    }
+
+    #[test]
+    fn parse_policy_accepts_default_multiplier_for_fixed_strategy() {
+        // multiplier defaults to 2.0 and is only checked when it's actually
+        // used, so a fixed-strategy policy shouldn't have to set it.
+        assert!(parse_policy("strategy=fixed").is_ok());
+    }
+
+    #[test]
+    fn parse_policy_rejects_max_delay_below_base_delay() {
+        let err = parse_policy("base_delay_ms=500\nmax_delay_ms=100").unwrap_err();
+        assert!(err.contains("max_delay_ms"));
     }
 
     #[test]
